@@ -1,0 +1,17 @@
+{
+  "url": "https://www.wiki-masters.com/",
+  "intervalMinutes": 10,
+
+  "openButton": "button:has-text(\"Ouvrir\"), button:has-text(\"Open\"), [role=button]:has-text(\"Ouvrir\")",
+
+  "nextCard": {
+    "selector": "button:has-text(\"Suivant\"), button:has-text(\"Next\"), [aria-label*=\"suivant\" i], [aria-label*=\"next\" i]",
+    "fallbackKey": "ArrowRight",
+    "delayMs": 800,
+    "maxCards": 20
+  },
+
+  "doneButton": "button:has-text(\"Terminer\"), button:has-text(\"Fermer\"), button:has-text(\"Continuer\"), button:has-text(\"Done\"), button:has-text(\"Close\")",
+
+  "screenshotEachCard": true
+}

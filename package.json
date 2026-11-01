@@ -1,0 +1,15 @@
+{
+  "name": "wiki-master-boosters",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "login": "node boosters.js login",
+    "start": "node boosters.js run",
+    "once": "node boosters.js once",
+    "codegen": "playwright codegen --channel=msedge https://www.wiki-masters.com/"
+  },
+  "dependencies": {
+    "playwright": "1.48.2"
+  }
+}

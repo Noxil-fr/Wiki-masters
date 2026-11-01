@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Wiki-Masters : prix de la collection
 // @namespace    wiki-master-boosters
-// @version      1.6
+// @version      1.7
 // @description  Ajoute un bouton "💰 Prix" qui liste les cartes de la collection triées par prix de vente moyen.
 // @match        https://www.wiki-masters.com/*
 // @match        https://wiki-masters.com/*
@@ -19,6 +19,7 @@
   const CACHE_KEY = 'wm-prix-cache';
   const ROWS_KEY = 'wm-prix-collection'; // dernier tableau affiché, montré tout de suite au clic suivant
   const HIDDEN_KEY = 'wm-prix-masquees'; // exemplaires retirés à la main (ids d'exemplaire, pas de carte)
+  const SEEN_KEY = 'wm-prix-vues';       // cartes présentes au dernier scan complet, pour repérer les nouvelles
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const log = (...a) => console.log('%c[Prix]', 'color:#16a34a;font-weight:bold', ...a);
@@ -36,6 +37,13 @@
   }
   function saveHidden(set) {
     try { localStorage.setItem(HIDDEN_KEY, JSON.stringify([...set])); } catch {}
+  }
+  // null = aucun scan complet encore fait (on ne marque alors rien comme nouveau).
+  function loadSeen() {
+    try { const a = JSON.parse(localStorage.getItem(SEEN_KEY)); return a ? new Set(a) : null; } catch { return null; }
+  }
+  function saveSeen(set) {
+    try { localStorage.setItem(SEEN_KEY, JSON.stringify([...set])); } catch {}
   }
 
   // --- Fichiers sur le PC : téléchargement (export) et lecture d'un fichier choisi (import) ---
@@ -133,6 +141,8 @@
     #wm-prix-panel a:hover { text-decoration: underline; }
     #wm-prix-panel .del { background: none; border: none; color: #6b746b; cursor: pointer; font-size: 15px; padding: 0 4px; }
     #wm-prix-panel .del:hover { color: #f87171; }
+    #wm-prix-panel tr.new td { background: #14301c; }
+    #wm-prix-panel header button.on { background: #16a34a; border-color: #16a34a; color: #fff; }
     #wm-prix-modal { position: fixed; inset: 0; z-index: 100000; display: grid; place-items: center;
       background: rgba(0,0,0,.6); font: 14px system-ui, sans-serif; }
     #wm-prix-modal > div { width: min(400px, calc(100vw - 32px)); padding: 20px; border-radius: 12px;
@@ -150,7 +160,7 @@
     return e;
   }
 
-  let panel, statusEl, tbody, lastRows = null, running = false;
+  let panel, statusEl, tbody, newBtn, lastRows = null, running = false, onlyNew = false;
 
   // Modale de confirmation. Résout true si l'utilisateur confirme ; Échap ou clic à côté = annuler.
   function confirmModal(message, okLabel) {
@@ -186,9 +196,20 @@
     tbody = el('tbody');
     const head = el('tr', {}, ['#', 'Carte', 'Rareté', 'Qté', 'Prix moyen', 'Total', ''].map((h, i) =>
       el('th', { textContent: h, className: i >= 3 && i <= 5 ? 'num' : '' })));
+    // Relance un scan complet et n'affiche que les cartes absentes du scan complet précédent.
+    // Re-cliquer pendant que le filtre est actif ré-affiche tout.
+    newBtn = el('button', {
+      title: 'Rescanner toute la collection et ne montrer que les cartes obtenues depuis le dernier scan complet',
+      onclick: () => {
+        onlyNew = !onlyNew;
+        if (onlyNew) run(false);
+        else if (lastRows) render(lastRows);
+      },
+    });
     panel = el('div', { id: 'wm-prix-panel' }, [
       el('header', {}, [
         el('strong', { textContent: '💰 Prix de ma collection' }),
+        newBtn,
         el('button', { textContent: '⬇ CSV', title: 'Télécharger le tableau pour Excel', onclick: exportCsv }),
         el('button', { textContent: '⬇ Sauvegarde', title: 'Télécharger la mémoire des prix (.json)', onclick: exportBackup }),
         el('button', { textContent: '⬆ Restaurer', title: 'Recharger un fichier de sauvegarde', onclick: importBackup }),
@@ -209,15 +230,23 @@
   function render(rows) {
     lastRows = rows;
     try { localStorage.setItem(ROWS_KEY, JSON.stringify(rows)); } catch {}
-    tbody.replaceChildren(...sortRows(rows).map((r, i) => el('tr', {}, [
+    const nNew = rows.filter((r) => r.isNew).length;
+    newBtn.textContent = onlyNew ? `🆕 Nouvelles (${nNew}) — tout afficher` : `🆕 Nouvelles${nNew ? ` (${nNew})` : ''}`;
+    newBtn.classList.toggle('on', onlyNew);
+    const shown = onlyNew ? rows.filter((r) => r.isNew) : rows;
+    tbody.replaceChildren(...sortRows(shown).map((r, i) => el('tr', { className: r.isNew ? 'new' : '' }, [
       el('td', { textContent: i + 1 }),
-      el('td', {}, [el('a', { href: r.url, target: '_blank', rel: 'noopener', textContent: r.title + (r.shiny ? ' ✨' : '') })]),
+      el('td', {}, [el('a', { href: r.url, target: '_blank', rel: 'noopener', textContent: r.title + (r.shiny ? ' ✨' : '') + (r.isNew ? ' 🆕' : '') })]),
       el('td', { textContent: r.rarity }),
       el('td', { className: 'num', textContent: r.count }),
       el('td', { className: 'num', textContent: r.price ?? (r.pending ? '…' : '—') }),
       el('td', { className: 'num', textContent: r.price != null ? r.price * r.count : '' }),
       el('td', {}, [el('button', { className: 'del', textContent: '✕', title: 'Retirer (carte vendue)', onclick: () => removeRow(r) })]),
     ])));
+    if (!shown.length) {
+      const msg = onlyNew ? 'Aucune nouvelle carte. Re-clique sur le bouton 🆕 pour tout afficher.' : 'Aucune carte.';
+      tbody.append(el('tr', {}, [el('td', { colSpan: 7, textContent: msg, style: 'color:#9ca39c;padding:16px' })]));
+    }
   }
 
   async function run(ignoreCache = false) {
@@ -255,9 +284,20 @@
       }
       const rows = [...byCard.values()];
 
+      // Nouvelles = absentes du scan complet précédent, ou dont le prix n'a jamais été vérifié.
+      // La liste de référence est remplacée tout de suite (la collection a été lue en entier),
+      // même si les prix sont interrompus.
+      const seen = loadSeen();
+      const cache = loadCache();
+      for (const r of rows) {
+        r.isNew = (seen != null && !seen.has(`${r.id}|${r.shiny}`)) || !cache[`${r.id}|${r.rarity}`];
+      }
+      saveSeen(new Set(items.map((it) => `${it.card_id}|${it.is_shiny}`)));
+      const nNew = rows.filter((r) => r.isNew).length;
+      const newMsg = ` ${nNew} nouvelle(s) : absentes du dernier scan complet ou jamais vérifiées.`;
+
       // En mise à jour, les anciens prix restent affichés et en mémoire jusqu'à leur remplacement :
       // un scan interrompu ne perd rien.
-      const cache = loadCache();
       for (const r of rows) {
         const c = cache[`${r.id}|${r.rarity}`];
         if (c) { r.price = c.price; r.pending = ignoreCache; }
@@ -296,7 +336,7 @@
 
       const priced = rows.filter((r) => r.price != null);
       const total = priced.reduce((s, r) => s + r.price * r.count, 0);
-      status(`${rows.length} cartes, ${priced.length} avec un prix connu. Valeur estimée totale : ${total}.`);
+      status(`${rows.length} cartes, ${priced.length} avec un prix connu. Valeur estimée totale : ${total}.${newMsg}`);
     } catch (err) {
       log(err);
       status(`Erreur : ${err.message}`);

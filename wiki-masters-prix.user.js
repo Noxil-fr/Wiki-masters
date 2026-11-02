@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Wiki-Masters : prix de la collection
 // @namespace    wiki-master-boosters
-// @version      1.7
+// @version      1.8
 // @description  Ajoute un bouton "💰 Prix" qui liste les cartes de la collection triées par prix de vente moyen.
 // @match        https://www.wiki-masters.com/*
 // @match        https://wiki-masters.com/*
@@ -20,6 +20,7 @@
   const ROWS_KEY = 'wm-prix-collection'; // dernier tableau affiché, montré tout de suite au clic suivant
   const HIDDEN_KEY = 'wm-prix-masquees'; // exemplaires retirés à la main (ids d'exemplaire, pas de carte)
   const SEEN_KEY = 'wm-prix-vues';       // cartes présentes au dernier scan complet, pour repérer les nouvelles
+  const ON_SALE_KEY = 'wm-prix-en-vente'; // exemplaires sortis de la collection (mis en vente), gardés jusqu'au ✕
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const log = (...a) => console.log('%c[Prix]', 'color:#16a34a;font-weight:bold', ...a);
@@ -45,6 +46,13 @@
   function saveSeen(set) {
     try { localStorage.setItem(SEEN_KEY, JSON.stringify([...set])); } catch {}
   }
+  // { idExemplaire: { id, title, url, rarity, shiny } }
+  function loadOnSale() {
+    try { return JSON.parse(localStorage.getItem(ON_SALE_KEY)) ?? {}; } catch { return {}; }
+  }
+  function saveOnSale(map) {
+    try { localStorage.setItem(ON_SALE_KEY, JSON.stringify(map)); } catch {}
+  }
 
   // --- Fichiers sur le PC : téléchargement (export) et lecture d'un fichier choisi (import) ---
   function download(name, content, type) {
@@ -59,9 +67,9 @@
     if (!lastRows) return alert('Lance d’abord un scan avec "💰 Prix".');
     const num = (n) => (n == null ? '' : String(n).replace('.', ','));
     const cell = (s) => `"${String(s).replace(/"/g, '""')}"`;
-    const lines = [['Carte', 'Rareté', 'Brillante', 'Qté', 'Prix moyen', 'Total', 'Lien'].join(';')];
+    const lines = [['Carte', 'Rareté', 'Brillante', 'En vente', 'Qté', 'Prix moyen', 'Total', 'Lien'].join(';')];
     for (const r of sortRows(lastRows)) {
-      lines.push([cell(r.title), r.rarity, r.shiny ? 'oui' : '', r.count, num(r.price),
+      lines.push([cell(r.title), r.rarity, r.shiny ? 'oui' : '', r.onSale ? 'oui' : '', r.count, num(r.price),
         num(r.price != null ? r.price * r.count : null), cell(r.url)].join(';'));
     }
     download(`wiki-masters-prix_${today()}.csv`, '﻿' + lines.join('\r\n'), 'text/csv;charset=utf-8');
@@ -142,6 +150,9 @@
     #wm-prix-panel .del { background: none; border: none; color: #6b746b; cursor: pointer; font-size: 15px; padding: 0 4px; }
     #wm-prix-panel .del:hover { color: #f87171; }
     #wm-prix-panel tr.new td { background: #14301c; }
+    #wm-prix-panel tr.on-sale td { color: #c9a227; }
+    #wm-prix-panel .sale { margin-left: 8px; padding: 1px 6px; border-radius: 6px; font-size: 12px;
+      background: #3a2f0b; color: #fcd34d; white-space: nowrap; }
     #wm-prix-panel header button.on { background: #16a34a; border-color: #16a34a; color: #fff; }
     #wm-prix-modal { position: fixed; inset: 0; z-index: 100000; display: grid; place-items: center;
       background: rgba(0,0,0,.6); font: 14px system-ui, sans-serif; }
@@ -181,11 +192,19 @@
   }
 
   async function removeRow(r) {
-    const ok = await confirmModal(`Retirer « ${r.title} » du tableau ?\nElle ne réapparaîtra pas, sauf si tu obtiens un nouvel exemplaire.`, 'Retirer');
+    const ok = await confirmModal(r.onSale
+      ? `« ${r.title} » est en vente.\nLa retirer du tableau parce qu'elle est vendue ?`
+      : `Retirer « ${r.title} » du tableau ?\nElle ne réapparaîtra pas, sauf si tu obtiens un nouvel exemplaire.`, 'Retirer');
     if (!ok) return;
-    const hidden = loadHidden();
-    for (const id of r.itemIds ?? []) hidden.add(id);
-    saveHidden(hidden);
+    if (r.onSale) {
+      const onSale = loadOnSale();
+      for (const id of r.itemIds ?? []) delete onSale[id];
+      saveOnSale(onSale);
+    } else {
+      const hidden = loadHidden();
+      for (const id of r.itemIds ?? []) hidden.add(id);
+      saveHidden(hidden);
+    }
     const i = lastRows.indexOf(r);
     if (i !== -1) lastRows.splice(i, 1); // même tableau que celui du scan en cours : la ligne ne revient pas
     render(lastRows);
@@ -234,9 +253,10 @@
     newBtn.textContent = onlyNew ? `🆕 Nouvelles (${nNew}) — tout afficher` : `🆕 Nouvelles${nNew ? ` (${nNew})` : ''}`;
     newBtn.classList.toggle('on', onlyNew);
     const shown = onlyNew ? rows.filter((r) => r.isNew) : rows;
-    tbody.replaceChildren(...sortRows(shown).map((r, i) => el('tr', { className: r.isNew ? 'new' : '' }, [
+    tbody.replaceChildren(...sortRows(shown).map((r, i) => el('tr', { className: r.onSale ? 'on-sale' : r.isNew ? 'new' : '' }, [
       el('td', { textContent: i + 1 }),
-      el('td', {}, [el('a', { href: r.url, target: '_blank', rel: 'noopener', textContent: r.title + (r.shiny ? ' ✨' : '') + (r.isNew ? ' 🆕' : '') })]),
+      el('td', {}, [el('a', { href: r.url, target: '_blank', rel: 'noopener', textContent: r.title + (r.shiny ? ' ✨' : '') + (r.isNew ? ' 🆕' : '') }),
+        r.onSale ? el('span', { className: 'sale', textContent: '📤 en vente' }) : '']),
       el('td', { textContent: r.rarity }),
       el('td', { className: 'num', textContent: r.count }),
       el('td', { className: 'num', textContent: r.price ?? (r.pending ? '…' : '—') }),
@@ -256,9 +276,10 @@
     const status = (t) => { statusEl.textContent = t; };
 
     // Affiche tout de suite le dernier tableau connu, pendant que la collection se recharge.
+    let prevRows = [];
     try {
       const saved = JSON.parse(localStorage.getItem(ROWS_KEY));
-      if (saved?.length) { render(saved.map((r) => ({ ...r, pending: false }))); }
+      if (saved?.length) { prevRows = saved; render(saved.map((r) => ({ ...r, pending: false }))); }
     } catch {}
 
     try {
@@ -284,7 +305,29 @@
       }
       const rows = [...byCard.values()];
 
-      // Nouvelles = absentes du scan complet précédent, ou dont le prix n'a jamais été vérifié.
+      // Une carte mise en vente sort de la collection côté site. On garde chaque exemplaire
+      // disparu avec la mention "en vente" jusqu'à ce que l'utilisateur le retire (✕) une fois
+      // vendu. S'il revient dans la collection (vente annulée), il redevient une carte normale.
+      const onSale = loadOnSale();
+      for (const r of prevRows) {
+        for (const itemId of r.itemIds ?? []) {
+          if (!present.has(itemId) && !hidden.has(itemId) && !onSale[itemId]) {
+            onSale[itemId] = { id: r.id, title: r.title, url: r.url, rarity: r.rarity, shiny: r.shiny };
+          }
+        }
+      }
+      for (const itemId of Object.keys(onSale)) if (present.has(itemId)) delete onSale[itemId];
+      saveOnSale(onSale);
+
+      const saleByCard = new Map();
+      for (const [itemId, c] of Object.entries(onSale)) {
+        const key = `${c.id}|${c.shiny}`;
+        const row = saleByCard.get(key);
+        if (row) { row.count++; row.itemIds.push(itemId); continue; }
+        saleByCard.set(key, { ...c, itemIds: [itemId], count: 1, price: null, pending: false, onSale: true, isNew: false });
+      }
+
+      // Nouvelles =absentes du scan complet précédent, ou dont le prix n'a jamais été vérifié.
       // La liste de référence est remplacée tout de suite (la collection a été lue en entier),
       // même si les prix sont interrompus.
       const seen = loadSeen();
@@ -295,6 +338,7 @@
       saveSeen(new Set(items.map((it) => `${it.card_id}|${it.is_shiny}`)));
       const nNew = rows.filter((r) => r.isNew).length;
       const newMsg = ` ${nNew} nouvelle(s) : absentes du dernier scan complet ou jamais vérifiées.`;
+      rows.push(...saleByCard.values());
 
       // En mise à jour, les anciens prix restent affichés et en mémoire jusqu'à leur remplacement :
       // un scan interrompu ne perd rien.

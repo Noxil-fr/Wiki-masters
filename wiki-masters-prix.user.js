@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Wiki-Masters : prix de la collection
 // @namespace    wiki-master-boosters
-// @version      1.8
+// @version      1.9
 // @description  Ajoute un bouton "💰 Prix" qui liste les cartes de la collection triées par prix de vente moyen.
 // @match        https://www.wiki-masters.com/*
 // @match        https://wiki-masters.com/*
@@ -14,13 +14,15 @@
   // --- Réglages ---
   const PARALLEL = 1;                    // demandes de prix simultanées (le site met ~3 s par prix)
   const DELAY_MS = 2000;                 // pause entre deux demandes (charge modérée sur le site)
-  const RARITY_ORDER = ['C', 'PC', 'R']; // de la moins rare à la plus rare ; une rareté inconnue passe en premier
+  // Commune, Peu commune, Rare, Super rare, Ultra rare, Légendaire.
+  const RARITY_ORDER = ['C', 'PC', 'R', 'SR', 'UR', 'L']; // de la moins rare à la plus rare ; une rareté inconnue passe en premier
   const MAX_PAGES = 100;                 // sécurité pour la pagination de la collection
   const CACHE_KEY = 'wm-prix-cache';
   const ROWS_KEY = 'wm-prix-collection'; // dernier tableau affiché, montré tout de suite au clic suivant
   const HIDDEN_KEY = 'wm-prix-masquees'; // exemplaires retirés à la main (ids d'exemplaire, pas de carte)
   const SEEN_KEY = 'wm-prix-vues';       // cartes présentes au dernier scan complet, pour repérer les nouvelles
-  const ON_SALE_KEY = 'wm-prix-en-vente'; // exemplaires sortis de la collection (mis en vente), gardés jusqu'au ✕
+  const ON_SALE_KEY = 'wm-prix-en-vente-v2'; // quantités sorties de la collection (mises en vente), gardées jusqu'au ✕
+  try { localStorage.removeItem('wm-prix-en-vente'); } catch {} // ancien format par exemplaire, faussé
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const log = (...a) => console.log('%c[Prix]', 'color:#16a34a;font-weight:bold', ...a);
@@ -46,7 +48,7 @@
   function saveSeen(set) {
     try { localStorage.setItem(SEEN_KEY, JSON.stringify([...set])); } catch {}
   }
-  // { idExemplaire: { id, title, url, rarity, shiny } }
+  // { "idCarte|brillante": { id, title, url, rarity, shiny, count } }
   function loadOnSale() {
     try { return JSON.parse(localStorage.getItem(ON_SALE_KEY)) ?? {}; } catch { return {}; }
   }
@@ -108,13 +110,15 @@
   // --- Collection : toutes les pages jusqu'à une page vide ---
   async function fetchCollection(onProgress) {
     const all = [];
+    const ids = new Set();
     let firstIdPrev = null;
     for (let page = 0; page < MAX_PAGES; page++) {
       const data = await getJson(`/api/my-collection?sort=rarity&page=${page}&stats=0`);
       const items = data.collection ?? [];
       if (!items.length || items[0].id === firstIdPrev) break; // fin, ou page ignorée par l'API
       firstIdPrev = items[0].id;
-      all.push(...items);
+      // Le tri par rareté n'est pas strict : un exemplaire peut revenir sur la page suivante.
+      for (const it of items) if (!ids.has(it.id)) { ids.add(it.id); all.push(it); }
       onProgress(`Collection : ${all.length} cartes (page ${page + 1})…`);
     }
     return all;
@@ -171,7 +175,9 @@
     return e;
   }
 
-  let panel, statusEl, tbody, newBtn, lastRows = null, running = false, onlyNew = false;
+  // runId change à chaque scan ou à chaque "Vider" : un scan dont l'id n'est plus le bon
+  // s'arrête et ne touche plus au tableau.
+  let panel, statusEl, tbody, newBtn, lastRows = null, running = false, onlyNew = false, runId = 0;
 
   // Modale de confirmation. Résout true si l'utilisateur confirme ; Échap ou clic à côté = annuler.
   function confirmModal(message, okLabel) {
@@ -198,7 +204,7 @@
     if (!ok) return;
     if (r.onSale) {
       const onSale = loadOnSale();
-      for (const id of r.itemIds ?? []) delete onSale[id];
+      delete onSale[`${r.id}|${r.shiny}`];
       saveOnSale(onSale);
     } else {
       const hidden = loadHidden();
@@ -208,6 +214,22 @@
     const i = lastRows.indexOf(r);
     if (i !== -1) lastRows.splice(i, 1); // même tableau que celui du scan en cours : la ligne ne revient pas
     render(lastRows);
+  }
+
+  // Repart d'une liste vide : tableau, cartes en vente, cartes retirées et référence des
+  // "nouvelles". La mémoire des prix est gardée (c'est elle qui coûte du temps à reconstruire).
+  async function clearList() {
+    const ok = await confirmModal('Vider la liste ?\nLe tableau, les cartes « en vente » et les cartes retirées seront oubliés.\nLes prix déjà connus sont gardés.'
+      + (running ? '\nLe scan en cours sera arrêté.' : ''), 'Vider');
+    if (!ok) return;
+    runId++;          // arrête le scan en cours, s'il y en a un
+    running = false;
+    for (const k of [ROWS_KEY, ON_SALE_KEY, HIDDEN_KEY, SEEN_KEY]) {
+      try { localStorage.removeItem(k); } catch {}
+    }
+    onlyNew = false;
+    render([]);
+    statusEl.textContent = 'Liste vidée. Clique sur "💰 Prix" pour rescanner la collection.';
   }
 
   function buildPanel() {
@@ -236,6 +258,7 @@
           textContent: '↻ Mettre à jour tous les prix',
           onclick: () => confirm('Redemander le prix de TOUTES les cartes ? Ça peut prendre plusieurs minutes.') && run(true),
         }),
+        el('button', { textContent: '🗑 Vider', title: 'Vider la liste (les prix connus sont gardés)', onclick: clearList }),
         el('button', { textContent: '✕', onclick: () => panel.remove() }),
       ]),
       statusEl,
@@ -272,8 +295,10 @@
   async function run(ignoreCache = false) {
     if (running) return;
     running = true;
+    const myId = ++runId;
+    const stale = () => myId !== runId;
     if (!panel?.isConnected) buildPanel();
-    const status = (t) => { statusEl.textContent = t; };
+    const status = (t) => { if (!stale()) statusEl.textContent = t; };
 
     // Affiche tout de suite le dernier tableau connu, pendant que la collection se recharge.
     let prevRows = [];
@@ -284,6 +309,7 @@
 
     try {
       const items = await fetchCollection(status);
+      if (stale()) return;
 
       // Oublie les exemplaires retirés qui ne sont plus dans la collection (vente finalisée).
       const hidden = loadHidden();
@@ -305,27 +331,33 @@
       }
       const rows = [...byCard.values()];
 
-      // Une carte mise en vente sort de la collection côté site. On garde chaque exemplaire
-      // disparu avec la mention "en vente" jusqu'à ce que l'utilisateur le retire (✕) une fois
-      // vendu. S'il revient dans la collection (vente annulée), il redevient une carte normale.
+      // Une carte mise en vente sort de la collection côté site. On compare les QUANTITÉS par
+      // carte avec le scan précédent (les ids d'exemplaire ne sont pas fiables : le site regroupe
+      // les doublons) : ce qui manque passe "en vente" jusqu'au ✕ ; ce qui revient (vente
+      // annulée) est retiré de la vente.
       const onSale = loadOnSale();
+      const prevCount = new Map();
       for (const r of prevRows) {
-        for (const itemId of r.itemIds ?? []) {
-          if (!present.has(itemId) && !hidden.has(itemId) && !onSale[itemId]) {
-            onSale[itemId] = { id: r.id, title: r.title, url: r.url, rarity: r.rarity, shiny: r.shiny };
-          }
+        if (r.onSale) continue;
+        prevCount.set(`${r.id}|${r.shiny}`, { row: r, count: r.count });
+      }
+      for (const [key, { row: p, count }] of prevCount) {
+        const now = byCard.get(key)?.count ?? 0;
+        if (now < count) {
+          const s = onSale[key] ??= { id: p.id, title: p.title, url: p.url, rarity: p.rarity, shiny: p.shiny, count: 0 };
+          s.count += count - now;
         }
       }
-      for (const itemId of Object.keys(onSale)) if (present.has(itemId)) delete onSale[itemId];
+      for (const [key, s] of Object.entries(onSale)) {
+        const before = prevCount.get(key)?.count ?? 0;
+        const now = byCard.get(key)?.count ?? 0;
+        if (now > before) s.count -= Math.min(s.count, now - before);
+        if (s.count <= 0) delete onSale[key];
+      }
       saveOnSale(onSale);
 
-      const saleByCard = new Map();
-      for (const [itemId, c] of Object.entries(onSale)) {
-        const key = `${c.id}|${c.shiny}`;
-        const row = saleByCard.get(key);
-        if (row) { row.count++; row.itemIds.push(itemId); continue; }
-        saleByCard.set(key, { ...c, itemIds: [itemId], count: 1, price: null, pending: false, onSale: true, isNew: false });
-      }
+      const saleByCard = new Map(Object.entries(onSale).map(([key, s]) =>
+        [key, { ...s, itemIds: [], price: null, pending: false, onSale: true, isNew: false }]));
 
       // Nouvelles =absentes du scan complet précédent, ou dont le prix n'a jamais été vérifié.
       // La liste de référence est remplacée tout de suite (la collection a été lue en entier),
@@ -354,7 +386,7 @@
       let next = 0, done = 0, blocked = null;
 
       async function worker() {
-        while (next < todo.length && !blocked) {
+        while (next < todo.length && !blocked && !stale()) {
           const r = todo[next++];
           try {
             r.price = await fetchPrice(r.id, r.rarity);
@@ -364,6 +396,7 @@
             log('Erreur prix', r.title, err.message);
             if (/^(403|429)/.test(err.message)) blocked = err.message.slice(0, 3);
           }
+          if (stale()) return; // liste vidée pendant la demande : on ne réaffiche rien
           r.pending = false;
           done++;
           status(`Prix ${done} / ${todo.length}…`);
@@ -372,6 +405,7 @@
         }
       }
       await Promise.all(Array.from({ length: PARALLEL }, worker));
+      if (stale()) return;
 
       if (blocked) {
         status(`Arrêt : le site refuse les demandes (${blocked}). Réessaie plus tard (ou baisse PARALLEL), les prix déjà obtenus sont gardés.`);
@@ -385,7 +419,7 @@
       log(err);
       status(`Erreur : ${err.message}`);
     } finally {
-      running = false;
+      if (!stale()) running = false; // sinon "Vider" l'a déjà fait, un autre scan a pu démarrer
     }
   }
 
